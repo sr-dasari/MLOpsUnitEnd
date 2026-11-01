@@ -54,8 +54,10 @@ class PipelineTrigger(FileSystemEventHandler):
         if path.suffix not in WATCH_EXTENSIONS:
             return
 
-        # Skip __pycache__ and temporary files
+        # Skip generated files, __pycache__, and temporary files
         if "__pycache__" in str(path) or path.name.startswith("."):
+            return
+        if path.name.startswith("processed_"):
             return
 
         now = time.time()
@@ -72,6 +74,7 @@ class PipelineTrigger(FileSystemEventHandler):
             [sys.executable, str(PIPELINE_SCRIPT), "--skip-api"],
             cwd=str(PROJECT_DIR.parent),
         )
+        self.last_run = time.time()
 
         if result.returncode == 0:
             print(f"\n  [trigger] Pipeline completed successfully.")

@@ -2,11 +2,13 @@
 
 An end-to-end MLOps project that preprocesses the Titanic dataset, trains and compares multiple classifiers, tracks experiments with MLflow, serves predictions via a FastAPI REST API, and monitors data drift and model performance using Evidently AI.
 
+> **Tested end-to-end on Windows using Git Bash.**
+
 ## Project Structure
 
 ```
 MLOpsUnitEnd/
-├── README.md                        # This file
+├── README.md                        # Instructions to fllow.
 └── titanic/
     ├── data/
     │   ├── titanic.csv              # Raw Titanic dataset
@@ -50,7 +52,8 @@ python -m venv venv
 
 Activate the virtual environment:
 
-- **Windows**: `venv\Scripts\activate`
+- **Windows (PowerShell)**: `venv\Scripts\activate`
+- **Windows (Git Bash)**: `source venv/Scripts/activate`
 - **macOS / Linux**: `source venv/bin/activate`
 
 Then install dependencies:
@@ -61,9 +64,38 @@ pip install -r requirements.txt
 
 ### Dataset
 
-The project uses the [Titanic dataset](https://www.kaggle.com/c/titanic/data). Place `titanic.csv` in the `data/` directory. The raw dataset should contain columns: PassengerId, Survived, Pclass, Name, Sex, Age, SibSp, Parch, Ticket, Fare, Cabin, Embarked.
+The raw Titanic dataset is already included at `data/titanic.csv` — no download required. It contains 891 rows with columns: PassengerId, Survived, Pclass, Name, Sex, Age, SibSp, Parch, Ticket, Fare, Cabin, Embarked.
 
-## Training and Deployment Steps
+## Quick Start — Full Pipeline
+
+The fastest way to run everything end-to-end is with the pipeline orchestrator. It chains preprocessing, training, MLflow tracking, monitoring, and API tests in one command:
+
+```bash
+python clean_slate.py --yes    # optional: reset to a clean state first
+python pipeline.py             # run all stages end-to-end
+```
+
+Pipeline options:
+
+```bash
+python pipeline.py --skip-api  # skip API tests
+python pipeline.py --check     # CI mode: exit code 1 if monitoring alerts fire
+```
+
+The pipeline runs these stages in order:
+
+1. **Data Preprocessing** → `src/data_preprocessing.py`
+2. **Model Training & MLflow Tracking** → `src/model_tracking_mlflow.py`
+3. **Monitoring Reports** → `src/generate_report.py`
+4. **API Tests** → `app/test_api.py` (optional)
+
+If any stage fails, the pipeline stops immediately with a non-zero exit code.
+
+If you prefer to run each step individually, or want to understand what each stage does, continue reading below.
+
+---
+
+## Step-by-Step Guide
 
 ### Step 0: Clean Slate (Optional but Recommended)
 
@@ -128,6 +160,8 @@ To browse experiments locally:
 mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
 
+This starts a web UI at `http://127.0.0.1:5000`. The terminal will remain occupied — open a **new terminal** (with the venv activated) to continue running other commands.
+
 ### Step 4: Deploy the REST API
 
 ```bash
@@ -135,7 +169,7 @@ python app/main.py                  # Auto-loads latest registered model
 python app/main.py --select         # Interactively pick a model from MLflow
 ```
 
-The API runs at `http://127.0.0.1:8000`:
+The API runs at `http://127.0.0.1:8000`. Open `http://127.0.0.1:8000/docs` in your browser to access the interactive Swagger UI where you can test the API directly.
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -172,6 +206,8 @@ POST /predict
 
 ### Step 5: Run API Tests
 
+> The API server (`main.py`) occupies the terminal. Open a **new terminal** and run `cd titanic` followed by the venv activation command (e.g., `source venv/Scripts/activate` on Git Bash) before running tests or other commands.
+
 ```bash
 python -m pytest app/test_api.py -v
 ```
@@ -182,22 +218,7 @@ python -m pytest app/test_api.py -v
 
 ## CI/CD Pipeline Configuration
 
-### Full Pipeline
-
-```bash
-python pipeline.py              # Run all stages end-to-end
-python pipeline.py --skip-api   # Skip API tests
-python pipeline.py --check      # CI mode: exit code 1 if monitoring alerts fire
-```
-
-The pipeline chains these stages in order:
-
-1. **Data Preprocessing** → `src/data_preprocessing.py`
-2. **Model Training & MLflow Tracking** → `src/model_tracking_mlflow.py`
-3. **Monitoring Reports** → `src/generate_report.py`
-4. **API Tests** → `app/test_api.py` (optional)
-
-If any stage fails, the pipeline stops immediately with a non-zero exit code.
+The full pipeline (`pipeline.py`) is documented in the [Quick Start](#quick-start--full-pipeline) section above.
 
 ### Auto-Trigger on File Changes
 
@@ -208,6 +229,15 @@ python trigger.py --once           # Run pipeline on next change, then exit
 ```
 
 Uses the `watchdog` library to monitor `data/` and `src/` directories. When a `.csv` or `.py` file is created or modified, the full pipeline runs automatically. A configurable cooldown prevents rapid re-runs.
+
+To test the trigger, open a **separate terminal** and run:
+
+```bash
+cd titanic
+touch data/titanic.csv
+```
+
+The trigger terminal should detect the change and start the pipeline automatically.
 
 ## Monitoring Strategy
 
