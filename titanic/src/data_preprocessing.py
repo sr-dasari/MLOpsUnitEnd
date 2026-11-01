@@ -105,21 +105,56 @@ print(f"- Address class imbalance: {overall_survival:.2%} survived vs {1 - overa
 
 # %%
 # Handle missing values
-df['Age'].fillna(df['Age'].median(), inplace=True)
-df['Embarked'].fillna(df['Embarked'].mode()[0], inplace=True)
+df['Age'] = df['Age'].fillna(df['Age'].median())
+df['Embarked'] = df['Embarked'].fillna(df['Embarked'].mode()[0])
 print(f"\nFilled missing values: Age ({df['Age'].isnull().sum()} remaining), Embarked ({df['Embarked'].isnull().sum()} remaining)")
+
+# %%
+# Feature Engineering
+print("\nPerforming feature engineering...")
+
+# Extract Title from Name
+df['Title'] = df['Name'].str.extract(r' ([A-Za-z]+)\.')
+title_map = {
+    'Mr': 'Mr', 'Miss': 'Miss', 'Mrs': 'Mrs', 'Master': 'Master',
+    'Dr': 'Rare', 'Rev': 'Rare', 'Col': 'Rare', 'Major': 'Rare',
+    'Mlle': 'Miss', 'Ms': 'Miss', 'Mme': 'Mrs',
+    'Sir': 'Rare', 'Lady': 'Rare', 'Capt': 'Rare', 'Don': 'Rare',
+    'Dona': 'Rare', 'Countess': 'Rare', 'Jonkheer': 'Rare'
+}
+df['Title'] = df['Title'].map(title_map).fillna('Rare')
+print(f"   • Titles extracted: {df['Title'].value_counts().to_dict()}")
+
+# FamilySize and IsAlone
+df['FamilySize'] = df['SibSp'] + df['Parch'] + 1
+df['IsAlone'] = (df['FamilySize'] == 1).astype(int)
+print(f"   • FamilySize range: {df['FamilySize'].min()} – {df['FamilySize'].max()}")
+print(f"   • Passengers travelling alone: {df['IsAlone'].sum()}")
+
+# %%
+# Handle outliers using IQR capping
+print("\nHandling outliers (IQR capping)...")
+for col in ['Age', 'Fare']:
+    Q1 = df[col].quantile(0.25)
+    Q3 = df[col].quantile(0.75)
+    IQR = Q3 - Q1
+    lower = Q1 - 1.5 * IQR
+    upper = Q3 + 1.5 * IQR
+    before = ((df[col] < lower) | (df[col] > upper)).sum()
+    df[col] = df[col].clip(lower=lower, upper=upper)
+    print(f"   • {col}: capped {before} outliers to [{lower:.2f}, {upper:.2f}]")
 
 # %%
 # Drop high-cardinality non-informative columns
 columns_to_drop = ['PassengerId', 'Name', 'Ticket', 'Cabin']
-df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+df = df.drop(columns=columns_to_drop, errors='ignore')
 
 print("Remaining columns in DataFrame:")
 print(df.columns.tolist())
 
 # %%
 # One-hot encode categorical columns
-categorical_cols = ['Sex', 'Embarked']
+categorical_cols = ['Sex', 'Embarked', 'Title']
 df_encoded = pd.get_dummies(df, columns=categorical_cols, drop_first=True)
 
 print("Columns after One-Hot Encoding:")

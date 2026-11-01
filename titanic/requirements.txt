@@ -1,8 +1,12 @@
 pandas<3.0
+numpy
 scikit-learn
-joblib
+xgboost
 mlflow
 fastapi
 uvicorn
+pydantic
 evidently
-protobuf==3.20.3
+watchdog
+pytest
+httpx

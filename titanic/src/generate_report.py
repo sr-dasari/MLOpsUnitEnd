@@ -1,39 +1,44 @@
 """
-Titanic Survival — Data Quality & Drift Monitoring Reports
-Generates two HTML reports in the reports/ directory:
-  1. quality_report.html   — dataset overview and column statistics
-  2. monitoring_report.html — feature drift analysis (reference vs. current)
+Titanic Survival — Data Quality, Drift & Model Performance Monitoring
+
+Generates three HTML reports in the reports/ directory:
+  1. quality_report.html      — dataset overview and column statistics
+  2. monitoring_report.html   — feature drift analysis (reference vs. current)
+  3. performance_report.html  — model performance metrics on current data
+
+Usage:
+  python generate_report.py            # generate all reports and open in browser
+  python generate_report.py --check    # headless mode: print alerts, exit non-zero if issues found
 """
 
+import argparse
+import sys
 import webbrowser
 from datetime import datetime
 from pathlib import Path
 
+import mlflow
+import mlflow.sklearn
 import numpy as np
 import pandas as pd
 from evidently import Report
-from evidently.presets import DataDriftPreset, DataSummaryPreset
+from evidently.presets import DataDriftPreset
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 
-# ── Paths ────────────────────────────────────────────────────────────────────
-DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
-REPORTS_DIR = Path('reports')
-REPORTS_DIR.mkdir(exist_ok=True)
+# ── Paths & Config ──────────────────────────────────────────────────────────
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_DIR / 'data'
+REPORTS_DIR = PROJECT_DIR / 'reports'
+PROCESSED_FILE = DATA_DIR / 'processed_titanic.csv'
 
-processed_file = DATA_DIR / 'processed_titanic.csv'
-
-# ── Load data ────────────────────────────────────────────────────────────────
-print(f"Reading processed data from: {processed_file}...")
-df = pd.read_csv(processed_file)
-print(f"Loaded dataset: {df.shape[0]} rows, {df.shape[1]} columns\n")
-
-split_index = int(len(df) * 0.8)
-reference = df.iloc[:split_index]
-current = df.iloc[split_index:]
-
-print(f"Reference (training baseline): {reference.shape[0]} rows")
-print(f"Current  (production simulation): {current.shape[0]} rows\n")
-
-timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+DRIFT_THRESHOLD = 0.3
+PERFORMANCE_THRESHOLDS = {
+    "accuracy": 0.75,
+    "precision": 0.70,
+    "recall": 0.65,
+    "f1_score": 0.70,
+    "roc_auc": 0.75,
+}
 
 CSS = """
 body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; color: #333; }
@@ -51,9 +56,19 @@ footer { margin-top: 2rem; font-size: 0.8rem; color: #999; }
 """
 
 
-# ── Quality Report ───────────────────────────────────────────────────────────
+# ── Data Loading ────────────────────────────────────────────────────────────
 
-def build_quality_report(dataframe):
+def load_data(path=PROCESSED_FILE):
+    df = pd.read_csv(path)
+    split_index = int(len(df) * 0.8)
+    reference = df.iloc[:split_index]
+    current = df.iloc[split_index:]
+    return df, reference, current
+
+
+# ── Quality Report ──────────────────────────────────────────────────────────
+
+def build_quality_report(dataframe, timestamp):
     rows, cols = dataframe.shape
     survival_rate = dataframe['Survived'].mean() * 100
 
@@ -63,9 +78,18 @@ def build_quality_report(dataframe):
         missing = int(dataframe[col].isnull().sum())
         unique = int(dataframe[col].nunique())
         if dataframe[col].dtype in ('float64', 'int64'):
-            col_rows += f"<tr><td>{col}</td><td>{dtype}</td><td class='num'>{unique}</td><td class='num'>{missing}</td><td class='num'>{dataframe[col].mean():.2f}</td><td class='num'>{dataframe[col].std():.2f}</td><td class='num'>{dataframe[col].min():.2f}</td><td class='num'>{dataframe[col].max():.2f}</td></tr>\n"
+            col_rows += (
+                f"<tr><td>{col}</td><td>{dtype}</td><td class='num'>{unique}</td>"
+                f"<td class='num'>{missing}</td><td class='num'>{dataframe[col].mean():.2f}</td>"
+                f"<td class='num'>{dataframe[col].std():.2f}</td><td class='num'>{dataframe[col].min():.2f}</td>"
+                f"<td class='num'>{dataframe[col].max():.2f}</td></tr>\n"
+            )
         else:
-            col_rows += f"<tr><td>{col}</td><td>{dtype}</td><td class='num'>{unique}</td><td class='num'>{missing}</td><td class='num'>—</td><td class='num'>—</td><td class='num'>—</td><td class='num'>—</td></tr>\n"
+            col_rows += (
+                f"<tr><td>{col}</td><td>{dtype}</td><td class='num'>{unique}</td>"
+                f"<td class='num'>{missing}</td><td class='num'>—</td><td class='num'>—</td>"
+                f"<td class='num'>—</td><td class='num'>—</td></tr>\n"
+            )
 
     return f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Data Quality Report</title><style>{CSS}</style></head>
@@ -82,17 +106,14 @@ def build_quality_report(dataframe):
 </body></html>"""
 
 
-# ── Drift Monitoring Report ──────────────────────────────────────────────────
+# ── Drift Report ────────────────────────────────────────────────────────────
 
-def build_drift_report(ref_data, cur_data):
+def compute_drift(ref_data, cur_data):
     drift_report = Report(metrics=[DataDriftPreset()])
     snapshot = drift_report.run(reference_data=ref_data, current_data=cur_data)
     metrics = snapshot.dict()["metrics"]
 
-    feature_rows = ""
-    drifted_count = 0
-    total = 0
-
+    features = []
     for m in metrics:
         config = m.get("config", {})
         if "ValueDrift" not in config.get("type", ""):
@@ -102,11 +123,23 @@ def build_drift_report(ref_data, cur_data):
         threshold = config.get("threshold", 0.1)
         score = float(m.get("value", 0))
         drifted = score > threshold
-        if drifted:
-            drifted_count += 1
-        total += 1
-        status = '<span class="bad">Drift</span>' if drifted else '<span class="ok">Stable</span>'
-        feature_rows += f"<tr><td>{col}</td><td>{method}</td><td class='num'>{score:.4f}</td><td class='num'>{threshold}</td><td>{status}</td></tr>\n"
+        features.append({"column": col, "method": method, "score": score,
+                         "threshold": threshold, "drifted": drifted})
+    return features
+
+
+def build_drift_report(ref_data, cur_data, drift_results, timestamp):
+    drifted_count = sum(1 for f in drift_results if f["drifted"])
+    total = len(drift_results)
+
+    feature_rows = ""
+    for f in drift_results:
+        status = '<span class="bad">Drift</span>' if f["drifted"] else '<span class="ok">Stable</span>'
+        feature_rows += (
+            f"<tr><td>{f['column']}</td><td>{f['method']}</td>"
+            f"<td class='num'>{f['score']:.4f}</td><td class='num'>{f['threshold']}</td>"
+            f"<td>{status}</td></tr>\n"
+        )
 
     if drifted_count == 0:
         summary = "No drift detected. The production data matches the training baseline."
@@ -132,14 +165,170 @@ A feature is flagged when its score exceeds the threshold.</p>
 </body></html>"""
 
 
-# ── Generate ─────────────────────────────────────────────────────────────────
+# ── Model Performance Report ────────────────────────────────────────────────
 
-quality_path = REPORTS_DIR / "quality_report.html"
-quality_path.write_text(build_quality_report(df), encoding="utf-8")
-print(f"Data quality report saved to {quality_path.resolve()}")
+def load_registered_model():
+    mlflow_db = Path(__file__).resolve().parent.parent / "mlflow.db"
+    mlflow.set_tracking_uri(f"sqlite:///{mlflow_db}")
+    client = mlflow.tracking.MlflowClient()
+    model_name = "titanic_survival_model"
+    versions = client.search_model_versions(f"name='{model_name}'")
+    if not versions:
+        return None, None
+    latest = max(versions, key=lambda v: int(v.version))
+    model_uri = f"models:/{model_name}/{latest.version}"
+    loaded = mlflow.sklearn.load_model(model_uri)
+    return loaded, f"{model_name} v{latest.version}"
 
-monitoring_path = REPORTS_DIR / "monitoring_report.html"
-monitoring_path.write_text(build_drift_report(reference, current), encoding="utf-8")
-print(f"Drift monitoring report saved to {monitoring_path.resolve()}")
 
-webbrowser.open(monitoring_path.resolve().as_uri())
+def compute_performance(model, current_data):
+    X = current_data.drop(columns=['Survived'])
+    y = current_data['Survived']
+    y_pred = model.predict(X)
+    y_proba = model.predict_proba(X)[:, 1]
+    return {
+        "accuracy": accuracy_score(y, y_pred),
+        "precision": precision_score(y, y_pred),
+        "recall": recall_score(y, y_pred),
+        "f1_score": f1_score(y, y_pred),
+        "roc_auc": roc_auc_score(y, y_proba),
+    }
+
+
+def build_performance_report(metrics, model_label, timestamp, n_samples):
+    metric_rows = ""
+    for name, value in metrics.items():
+        threshold = PERFORMANCE_THRESHOLDS.get(name, 0)
+        if value >= threshold:
+            status = f'<span class="ok">OK (>= {threshold})</span>'
+        else:
+            status = f'<span class="bad">BELOW threshold ({threshold})</span>'
+        metric_rows += (
+            f"<tr><td>{name}</td><td class='num'>{value:.4f}</td>"
+            f"<td class='num'>{threshold:.2f}</td><td>{status}</td></tr>\n"
+        )
+
+    degraded = [n for n, v in metrics.items()
+                if v < PERFORMANCE_THRESHOLDS.get(n, 0)]
+    if not degraded:
+        summary = "All metrics are within acceptable thresholds."
+    else:
+        summary = f"ALERT: {', '.join(degraded)} below threshold. Consider retraining."
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Model Performance Report</title><style>{CSS}</style></head>
+<body>
+<h1>Model Performance Report</h1>
+<p>Generated {timestamp} &mdash; Model: {model_label} &mdash; Evaluated on {n_samples} samples (current data split)</p>
+<p><strong>{summary}</strong></p>
+
+<h2>Metrics</h2>
+<table>
+<tr><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th></tr>
+{metric_rows}</table>
+
+<footer>Generated by generate_report.py</footer>
+</body></html>"""
+
+
+# ── Alerting ────────────────────────────────────────────────────────────────
+
+def check_alerts(drift_results, perf_metrics):
+    """Print alerts to console and return True if any issues found."""
+    alerts = []
+
+    high_drift = [f for f in drift_results if f["score"] > DRIFT_THRESHOLD]
+    if high_drift:
+        cols = ", ".join(f["column"] for f in high_drift)
+        alerts.append(f"DRIFT ALERT: {len(high_drift)} feature(s) with high drift (>{DRIFT_THRESHOLD}): {cols}")
+
+    for name, value in perf_metrics.items():
+        threshold = PERFORMANCE_THRESHOLDS.get(name, 0)
+        if value < threshold:
+            alerts.append(f"PERFORMANCE ALERT: {name} = {value:.4f} is below threshold {threshold}")
+
+    if alerts:
+        print("\n" + "=" * 60)
+        print("MONITORING ALERTS")
+        print("=" * 60)
+        for alert in alerts:
+            print(f"  !! {alert}")
+        print("=" * 60)
+    else:
+        print("\nAll monitoring checks passed. No alerts.")
+
+    return len(alerts) > 0
+
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+def generate_reports(check_only=False):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    print(f"Reading processed data from: {PROCESSED_FILE}...")
+    df, reference, current = load_data()
+    print(f"Loaded dataset: {df.shape[0]} rows, {df.shape[1]} columns")
+    print(f"Reference (training baseline): {reference.shape[0]} rows")
+    print(f"Current  (production simulation): {current.shape[0]} rows\n")
+
+    # Drift analysis
+    print("Running drift analysis...")
+    drift_results = compute_drift(reference, current)
+    drifted = sum(1 for f in drift_results if f["drifted"])
+    print(f"Drift: {drifted} of {len(drift_results)} features drifted")
+
+    # Model performance
+    print("\nLoading registered model for performance evaluation...")
+    model, model_label = load_registered_model()
+    perf_metrics = {}
+    if model:
+        print(f"Evaluating {model_label} on current data...")
+        perf_metrics = compute_performance(model, current)
+        for name, value in perf_metrics.items():
+            print(f"  {name}: {value:.4f}")
+    else:
+        print("No registered model found — skipping performance evaluation.")
+
+    # Alerts
+    has_alerts = check_alerts(drift_results, perf_metrics)
+
+    if check_only:
+        return has_alerts
+
+    # Generate HTML reports
+    REPORTS_DIR.mkdir(exist_ok=True)
+
+    quality_path = REPORTS_DIR / "quality_report.html"
+    quality_path.write_text(build_quality_report(df, timestamp), encoding="utf-8")
+    print(f"\nData quality report saved to {quality_path.resolve()}")
+
+    monitoring_path = REPORTS_DIR / "monitoring_report.html"
+    monitoring_path.write_text(
+        build_drift_report(reference, current, drift_results, timestamp),
+        encoding="utf-8",
+    )
+    print(f"Drift monitoring report saved to {monitoring_path.resolve()}")
+
+    if model:
+        perf_path = REPORTS_DIR / "performance_report.html"
+        perf_path.write_text(
+            build_performance_report(perf_metrics, model_label, timestamp, len(current)),
+            encoding="utf-8",
+        )
+        print(f"Performance report saved to {perf_path.resolve()}")
+
+    webbrowser.open(monitoring_path.resolve().as_uri())
+    return has_alerts
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate monitoring reports")
+    parser.add_argument(
+        "--check", action="store_true",
+        help="Headless mode: print alerts and exit non-zero if issues found (no HTML generated)",
+    )
+    args = parser.parse_args()
+
+    has_issues = generate_reports(check_only=args.check)
+    if args.check and has_issues:
+        sys.exit(1)
