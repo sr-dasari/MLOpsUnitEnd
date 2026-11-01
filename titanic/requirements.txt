@@ -1,0 +1,8 @@
+pandas<3.0
+scikit-learn
+joblib
+mlflow
+fastapi
+uvicorn
+evidently
+protobuf==3.20.3
