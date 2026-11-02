@@ -24,6 +24,7 @@ import pandas as pd
 from evidently import Report
 from evidently.presets import DataDriftPreset
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.model_selection import train_test_split
 
 # ── Paths & Config ──────────────────────────────────────────────────────────
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -60,9 +61,9 @@ footer { margin-top: 2rem; font-size: 0.8rem; color: #999; }
 
 def load_data(path=PROCESSED_FILE):
     df = pd.read_csv(path)
-    split_index = int(len(df) * 0.8)
-    reference = df.iloc[:split_index]
-    current = df.iloc[split_index:]
+    reference, current = train_test_split(
+        df, test_size=0.2, random_state=42, stratify=df['Survived']
+    )
     return df, reference, current
 
 
@@ -122,7 +123,8 @@ def compute_drift(ref_data, cur_data):
         method = config.get("method", "")
         threshold = config.get("threshold", 0.1)
         score = float(m.get("value", 0))
-        drifted = score > threshold
+        is_pvalue = "p_value" in method
+        drifted = score < threshold if is_pvalue else score > threshold
         features.append({"column": col, "method": method, "score": score,
                          "threshold": threshold, "drifted": drifted})
     return features
@@ -167,18 +169,49 @@ A feature is flagged when its score exceeds the threshold.</p>
 
 # ── Model Performance Report ────────────────────────────────────────────────
 
-def load_registered_model():
+def load_all_models():
     mlflow_db = Path(__file__).resolve().parent.parent / "mlflow.db"
     mlflow.set_tracking_uri(f"sqlite:///{mlflow_db}")
     client = mlflow.tracking.MlflowClient()
+
+    registered_run_id = None
+    registered_label = None
     model_name = "titanic_survival_model"
     versions = client.search_model_versions(f"name='{model_name}'")
-    if not versions:
-        return None, None
-    latest = max(versions, key=lambda v: int(v.version))
-    model_uri = f"models:/{model_name}/{latest.version}"
-    loaded = mlflow.sklearn.load_model(model_uri)
-    return loaded, f"{model_name} v{latest.version}"
+    if versions:
+        latest = max(versions, key=lambda v: int(v.version))
+        registered_run_id = latest.run_id
+        registered_label = f"{model_name} v{latest.version}"
+
+    experiment = client.get_experiment_by_name("titanic_experiment")
+    if experiment is None:
+        return [], registered_label
+
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        order_by=["metrics.f1_score DESC"],
+    )
+
+    models = []
+    for run in runs:
+        model_type = run.data.params.get("model_type", "Unknown")
+        artifact_name = f"{model_type}_classifier"
+        model_uri = f"runs:/{run.info.run_id}/{artifact_name}"
+        try:
+            loaded = mlflow.sklearn.load_model(model_uri)
+        except Exception:
+            continue
+        is_registered = run.info.run_id == registered_run_id
+        models.append({
+            "name": model_type,
+            "model": loaded,
+            "run_id": run.info.run_id,
+            "is_registered": is_registered,
+            "label": f"{model_type} ({registered_label})" if is_registered else model_type,
+        })
+
+    models.sort(key=lambda m: (not m["is_registered"], m["name"]))
+    return models, registered_label
 
 
 def compute_performance(model, current_data):
@@ -195,38 +228,56 @@ def compute_performance(model, current_data):
     }
 
 
-def build_performance_report(metrics, model_label, timestamp, n_samples):
-    metric_rows = ""
-    for name, value in metrics.items():
-        threshold = PERFORMANCE_THRESHOLDS.get(name, 0)
-        if value >= threshold:
-            status = f'<span class="ok">OK (>= {threshold})</span>'
-        else:
-            status = f'<span class="bad">BELOW threshold ({threshold})</span>'
-        metric_rows += (
-            f"<tr><td>{name}</td><td class='num'>{value:.4f}</td>"
-            f"<td class='num'>{threshold:.2f}</td><td>{status}</td></tr>\n"
-        )
+def build_performance_report(all_model_results, registered_label, timestamp, n_samples):
+    registered_metrics = {}
 
-    degraded = [n for n, v in metrics.items()
+    model_sections = ""
+    for entry in all_model_results:
+        name = entry["label"]
+        metrics = entry["metrics"]
+        is_reg = entry["is_registered"]
+
+        if is_reg:
+            registered_metrics = metrics
+            badge = ' <span style="background:#2563eb;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.8rem;">Deployed</span>'
+        else:
+            badge = ""
+
+        metric_rows = ""
+        for mname, value in metrics.items():
+            threshold = PERFORMANCE_THRESHOLDS.get(mname, 0)
+            if value >= threshold:
+                status = f'<span class="ok">OK (>= {threshold})</span>'
+            else:
+                status = f'<span class="bad">BELOW threshold ({threshold})</span>'
+            metric_rows += (
+                f"<tr><td>{mname}</td><td class='num'>{value:.4f}</td>"
+                f"<td class='num'>{threshold:.2f}</td><td>{status}</td></tr>\n"
+            )
+
+        model_sections += f"""
+<h2>{name}{badge}</h2>
+<table>
+<tr><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th></tr>
+{metric_rows}</table>
+"""
+
+    degraded = [n for n, v in registered_metrics.items()
                 if v < PERFORMANCE_THRESHOLDS.get(n, 0)]
-    if not degraded:
-        summary = "All metrics are within acceptable thresholds."
+    if not registered_metrics:
+        summary = "No registered model found."
+    elif not degraded:
+        summary = "All metrics for the deployed model are within acceptable thresholds."
     else:
-        summary = f"ALERT: {', '.join(degraded)} below threshold. Consider retraining."
+        summary = f"ALERT: {', '.join(degraded)} below threshold on deployed model. Consider retraining."
 
     return f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Model Performance Report</title><style>{CSS}</style></head>
 <body>
 <h1>Model Performance Report</h1>
-<p>Generated {timestamp} &mdash; Model: {model_label} &mdash; Evaluated on {n_samples} samples (current data split)</p>
+<p>Generated {timestamp} &mdash; Deployed: {registered_label or 'N/A'} &mdash; Evaluated on {n_samples} samples (current data split)</p>
 <p><strong>{summary}</strong></p>
-
-<h2>Metrics</h2>
-<table>
-<tr><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th></tr>
-{metric_rows}</table>
-
+{model_sections}
 <footer>Generated by generate_report.py</footer>
 </body></html>"""
 
@@ -237,10 +288,10 @@ def check_alerts(drift_results, perf_metrics):
     """Print alerts to console and return True if any issues found."""
     alerts = []
 
-    high_drift = [f for f in drift_results if f["score"] > DRIFT_THRESHOLD]
+    high_drift = [f for f in drift_results if f["drifted"]]
     if high_drift:
         cols = ", ".join(f["column"] for f in high_drift)
-        alerts.append(f"DRIFT ALERT: {len(high_drift)} feature(s) with high drift (>{DRIFT_THRESHOLD}): {cols}")
+        alerts.append(f"DRIFT ALERT: {len(high_drift)} feature(s) drifted: {cols}")
 
     for name, value in perf_metrics.items():
         threshold = PERFORMANCE_THRESHOLDS.get(name, 0)
@@ -278,19 +329,26 @@ def generate_reports(check_only=False):
     print(f"Drift: {drifted} of {len(drift_results)} features drifted")
 
     # Model performance
-    print("\nLoading registered model for performance evaluation...")
-    model, model_label = load_registered_model()
-    perf_metrics = {}
-    if model:
-        print(f"Evaluating {model_label} on current data...")
-        perf_metrics = compute_performance(model, current)
-        for name, value in perf_metrics.items():
-            print(f"  {name}: {value:.4f}")
+    print("\nLoading all models for performance evaluation...")
+    all_models, registered_label = load_all_models()
+    all_model_results = []
+    registered_metrics = {}
+    if all_models:
+        for entry in all_models:
+            print(f"Evaluating {entry['label']} on current data...")
+            metrics = compute_performance(entry["model"], current)
+            for mname, value in metrics.items():
+                print(f"  {mname}: {value:.4f}")
+            entry["metrics"] = metrics
+            all_model_results.append(entry)
+            if entry["is_registered"]:
+                registered_metrics = metrics
+            print()
     else:
-        print("No registered model found — skipping performance evaluation.")
+        print("No models found — skipping performance evaluation.")
 
-    # Alerts
-    has_alerts = check_alerts(drift_results, perf_metrics)
+    # Alerts (based on deployed model only)
+    has_alerts = check_alerts(drift_results, registered_metrics)
 
     if check_only:
         return has_alerts
@@ -309,10 +367,10 @@ def generate_reports(check_only=False):
     )
     print(f"Drift monitoring report saved to {monitoring_path.resolve()}")
 
-    if model:
+    if all_model_results:
         perf_path = REPORTS_DIR / "performance_report.html"
         perf_path.write_text(
-            build_performance_report(perf_metrics, model_label, timestamp, len(current)),
+            build_performance_report(all_model_results, registered_label, timestamp, len(current)),
             encoding="utf-8",
         )
         print(f"Performance report saved to {perf_path.resolve()}")

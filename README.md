@@ -4,6 +4,26 @@ An end-to-end MLOps project that preprocesses the Titanic dataset, trains and co
 
 > **Tested end-to-end on Windows using Git Bash.**
 
+## Table of Contents
+
+1. [Project Structure](#project-structure)
+2. [Project Setup](#project-setup)
+3. [Quick Start — Full Pipeline](#quick-start--full-pipeline)
+4. [Step-by-Step Guide](#step-by-step-guide)
+   - [Step 0: Clean Slate](#step-0-clean-slate-optional-but-recommended)
+   - [Step 1: Data Preprocessing](#step-1-data-preprocessing)
+   - [Step 2: Model Training & Evaluation](#step-2-model-training--evaluation)
+   - [Step 3: MLflow Experiment Tracking](#step-3-mlflow-experiment-tracking)
+   - [Step 4: Deploy the REST API](#step-4-deploy-the-rest-api)
+   - [Step 5: Run API Tests](#step-5-run-api-tests)
+5. [CI/CD Pipeline Configuration](#cicd-pipeline-configuration)
+6. [Monitoring Strategy](#monitoring-strategy)
+7. [Tools and Configurations](#tools-and-configurations)
+8. [Best Practices for Reproducibility and Scalability](#best-practices-for-reproducibility-and-scalability)
+9. [Deliverables Checklist](#deliverables-checklist)
+10. [Lessons Learned](#lessons-learned)
+11. [Future Recommendations](#future-recommendations)
+
 ## Project Structure
 
 ```
@@ -90,6 +110,8 @@ The pipeline runs these stages in order:
 4. **API Tests** → `app/test_api.py` (optional)
 
 If any stage fails, the pipeline stops immediately with a non-zero exit code.
+
+> **After running `pipeline.py`**, Steps 0–3 are already complete. Jump directly to [Step 3: MLflow Experiment Tracking](#step-3-mlflow-experiment-tracking) to browse the MLflow UI, then continue from [Step 4: Deploy the REST API](#step-4-deploy-the-rest-api).
 
 If you prefer to run each step individually, or want to understand what each stage does, continue reading below.
 
@@ -319,3 +341,61 @@ In `--check` mode, the script exits with code 1 if any alerts fire, making it su
 - **Configurable thresholds**: Drift and performance thresholds are defined as constants at the top of `src/generate_report.py`, easily adjustable without code changes
 - **Pipeline extensibility**: `pipeline.py` stages are a simple list — add new stages (e.g., data validation, A/B testing) by appending to the `STEPS` list
 - **Trigger-based automation**: `trigger.py` watches for file changes locally; for production, replace with CI/CD webhooks (GitHub Actions, Jenkins) using the same `pipeline.py` entry point
+
+---
+
+## Deliverables Checklist
+
+### Codebase
+
+- [x] Clean Python scripts for data preprocessing (`src/data_preprocessing.py`)
+- [x] Model training and evaluation (`src/model_training.py`)
+- [x] MLflow experiment tracking and model registry (`src/model_tracking_mlflow.py`)
+- [x] Feature engineering, outlier handling, and one-hot encoding
+- [x] Three classifiers compared: Random Forest, XGBoost, Logistic Regression
+
+### API Deployment
+
+- [x] FastAPI REST API serving predictions (`app/main.py`)
+- [x] Pydantic input validation with constraints (Pclass, Sex, Age, Embarked, etc.)
+- [x] Interactive Swagger UI at `/docs` with full schema documentation
+- [x] Automated API tests with pytest (`app/test_api.py` — 11 tests)
+
+### CI/CD System
+
+- [x] End-to-end pipeline orchestrator (`pipeline.py`)
+- [x] Automated retraining, report generation, and API testing in sequence
+- [x] File-watcher trigger using Watchdog (`trigger.py`) — auto-runs pipeline on data/code changes
+- [x] `--check` mode for headless CI (exit code 1 on monitoring alerts)
+- [x] Clean slate script (`clean_slate.py`) for reproducible fresh runs
+
+### Monitoring Artifacts
+
+- [x] Data quality report (`reports/quality_report.html`)
+- [x] Data drift report using Evidently AI (`reports/monitoring_report.html`)
+- [x] Model performance report with threshold alerts (`reports/performance_report.html`)
+- [x] Console alerting for drift and performance degradation
+
+### Documentation Report
+
+- [x] Project objectives and pipeline architecture (this README)
+- [x] Tool integration details (MLflow, FastAPI, Evidently AI, Watchdog)
+- [x] Step-by-step usage guide with examples
+- [x] Best practices for reproducibility and scalability
+- [x] Screenshots of outputs (MLflow UI, Swagger UI, monitoring reports) — included in project zip
+- [x] Lessons learned and future recommendations
+
+---
+
+## Lessons Learned
+
+- **Version compatibility**: Library versions must be pinned carefully — pandas 3.x introduced breaking changes with `inplace=True` and Evidently AI, and MLflow's experiment API changed across releases. Pinning `pandas<3.0` and using the lower-level `MlflowClient` directly avoided these issues.
+- **Relative paths**: Scripts that use relative paths resolve from the current working directory, not the script's own location. Using `Path(__file__).resolve().parent` throughout the project ensured all generated artifacts (MLflow database, reports, processed data) land in the correct directories regardless of where the command is run from.
+- **Cooldown timers**: In file-watcher automation, cooldown periods should start *after* the triggered task finishes, not when it starts. Otherwise, long-running pipelines outlast the cooldown window and delayed filesystem events cause unintended re-triggers.
+
+## Future Recommendations
+
+- **Authentication**: Add API key or OAuth authentication to the FastAPI endpoint before exposing it beyond localhost.
+- **Periodic retraining**: Schedule automated retraining on a cron interval with fresh data, rather than relying solely on manual or file-change triggers.
+- **Containerized deployment**: Package the API and its dependencies in a Docker container for environment isolation, consistent deployments, and easier scaling.
+- **Web-served monitoring reports**: Serve monitoring reports through a web container (e.g., Nginx or a lightweight Flask/FastAPI route) instead of opening local HTML files, enabling remote access and integration with dashboarding tools.
